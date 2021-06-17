@@ -120,17 +120,19 @@ class FTX(Feed):
                         data = json.loads(data, parse_float=Decimal)
                         if 'result' in data:
                             oi = data['result']['openInterest']
-                            if oi != self.open_interest.get(pair, None):
-                                await self.callback(OPEN_INTEREST,
-                                                    feed=self.id,
-                                                    symbol=pair,
-                                                    open_interest=oi,
-                                                    timestamp=time(),
-                                                    receipt_timestamp=time()
-                                                    )
-                                self.open_interest[pair] = oi
-                                await asyncio.sleep(rate_limiter)
-                wait_time = 60
+                            # if oi != self.open_interest.get(pair, None):
+                            await self.callback(
+                                OPEN_INTEREST,
+                                feed=self.id,
+                                symbol=pair,
+                                open_interest=oi,
+                                timestamp=time(),
+                                receipt_timestamp=time(),
+                                raw=data['result']
+                            )
+                            self.open_interest[pair] = oi
+                            await asyncio.sleep(rate_limiter)
+                wait_time = 30
                 await asyncio.sleep(wait_time)
 
     async def _funding(self, pairs: Iterable):
@@ -149,7 +151,7 @@ class FTX(Feed):
         # do not send more than 30 requests per second: doing so will result in HTTP 429 errors
         rate_limiter = 0.1
         # funding rates do not change frequently
-        wait_time = 60
+        wait_time = 30
         async with aiohttp.ClientSession() as session:
             while True:
                 for pair in pairs:
@@ -162,16 +164,20 @@ class FTX(Feed):
                         last_update = self.funding.get(pair, None)
                         update = str(data['result'][0]['rate']) + str(data['result'][0]['time'])
                         if last_update and last_update == update:
-                            continue
+                            # continue
+                            pass
                         else:
                             self.funding[pair] = update
 
-                        await self.callback(FUNDING, feed=self.id,
-                                            symbol=self.exchange_symbol_to_std_symbol(data['result'][0]['future']),
-                                            rate=data['result'][0]['rate'],
-                                            timestamp=timestamp_normalize(self.id, data['result'][0]['time']),
-                                            receipt_timestamp=time()
-                                            )
+                        await self.callback(
+                            FUNDING,
+                            feed=self.id,
+                            symbol=self.exchange_symbol_to_std_symbol(data['result'][0]['future']),
+                            rate=data['result'][0]['rate'],
+                            timestamp=timestamp_normalize(self.id, data['result'][0]['time']),
+                            receipt_timestamp=time(),
+                            raw=data['result'][0]
+                        )
                     await asyncio.sleep(rate_limiter)
                 await asyncio.sleep(wait_time)
 
@@ -183,25 +189,32 @@ class FTX(Feed):
         "size": 0.3616, "side": "buy", "liquidation": false, "time": "2019-08-03T12:20:19.170586+00:00"}]}
         """
         for trade in msg['data']:
-            await self.callback(TRADES, feed=self.id,
-                                symbol=self.exchange_symbol_to_std_symbol(msg['market']),
-                                side=BUY if trade['side'] == 'buy' else SELL,
-                                amount=Decimal(trade['size']),
-                                price=Decimal(trade['price']),
-                                order_id=trade['id'],
-                                timestamp=float(timestamp_normalize(self.id, trade['time'])),
-                                receipt_timestamp=timestamp)
+            await self.callback(
+                TRADES,
+                feed=self.id,
+                symbol=self.exchange_symbol_to_std_symbol(msg['market']),
+                side=BUY if trade['side'] == 'buy' else SELL,
+                amount=Decimal(trade['size']),
+                price=Decimal(trade['price']),
+                order_id=trade['id'],
+                timestamp=float(timestamp_normalize(self.id, trade['time'])),
+                receipt_timestamp=timestamp,
+                raw=trade
+            )
             if bool(trade['liquidation']):
-                await self.callback(LIQUIDATIONS,
-                                    feed=self.id,
-                                    symbol=self.exchange_symbol_to_std_symbol(msg['market']),
-                                    side=BUY if trade['side'] == 'buy' else SELL,
-                                    leaves_qty=Decimal(trade['size']),
-                                    price=Decimal(trade['price']),
-                                    order_id=trade['id'],
-                                    status=FILLED,
-                                    timestamp=float(timestamp_normalize(self.id, trade['time'])),
-                                    receipt_timestamp=timestamp)
+                await self.callback(
+                    LIQUIDATIONS,
+                    feed=self.id,
+                    symbol=self.exchange_symbol_to_std_symbol(msg['market']),
+                    side=BUY if trade['side'] == 'buy' else SELL,
+                    leaves_qty=Decimal(trade['size']),
+                    price=Decimal(trade['price']),
+                    order_id=trade['id'],
+                    status=FILLED,
+                    timestamp=float(timestamp_normalize(self.id, trade['time'])),
+                    receipt_timestamp=timestamp,
+                    raw=trade
+                )
 
     async def _ticker(self, msg: dict, timestamp: float):
         """
@@ -210,12 +223,16 @@ class FTX(Feed):
         {"channel": "ticker", "market": "BTC/USD", "type": "update", "data": {"bid": 10717.5, "ask": 10719.0,
         "last": 10719.0, "time": 1564834587.1299787}}
         """
-        await self.callback(TICKER, feed=self.id,
-                            symbol=self.exchange_symbol_to_std_symbol(msg['market']),
-                            bid=Decimal(msg['data']['bid'] if msg['data']['bid'] else 0.0),
-                            ask=Decimal(msg['data']['ask'] if msg['data']['ask'] else 0.0),
-                            timestamp=float(msg['data']['time']),
-                            receipt_timestamp=timestamp)
+        await self.callback(
+            TICKER,
+            feed=self.id,
+            symbol=self.exchange_symbol_to_std_symbol(msg['market']),
+            bid=Decimal(msg['data']['bid'] if msg['data']['bid'] else 0.0),
+            ask=Decimal(msg['data']['ask'] if msg['data']['ask'] else 0.0),
+            timestamp=float(msg['data']['time']),
+            receipt_timestamp=timestamp,
+            raw=msg
+        )
 
     async def _book(self, msg: dict, timestamp: float):
         """
@@ -264,17 +281,21 @@ class FTX(Feed):
             await self.book_callback(self.l2_book[pair], L2_BOOK, pair, False, delta, float(msg['data']['time']), timestamp)
 
     async def message_handler(self, msg: str, conn, timestamp: float):
-        msg = json.loads(msg, parse_float=Decimal)
-        if 'type' in msg and msg['type'] == 'subscribed':
+        try:
+            msg = json.loads(msg, parse_float=Decimal)
+        except Exception:
             return
-        elif 'channel' in msg:
-            if msg['channel'] == 'orderbook':
-                await self._book(msg, timestamp)
-            elif msg['channel'] == 'trades':
-                await self._trade(msg, timestamp)
-            elif msg['channel'] == 'ticker':
-                await self._ticker(msg, timestamp)
+        else:
+            if 'type' in msg and msg['type'] == 'subscribed':
+                return
+            elif 'channel' in msg:
+                if msg['channel'] == 'orderbook':
+                    await self._book(msg, timestamp)
+                elif msg['channel'] == 'trades':
+                    await self._trade(msg, timestamp)
+                elif msg['channel'] == 'ticker':
+                    await self._ticker(msg, timestamp)
+                else:
+                    LOG.warning("%s: Invalid message type %s", self.id, msg)
             else:
                 LOG.warning("%s: Invalid message type %s", self.id, msg)
-        else:
-            LOG.warning("%s: Invalid message type %s", self.id, msg)
