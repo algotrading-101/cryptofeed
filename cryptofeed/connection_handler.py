@@ -6,6 +6,7 @@ associated with this software.
 '''
 import asyncio
 import logging
+import random
 from socket import error as socket_error
 import time
 from typing import Awaitable
@@ -23,16 +24,18 @@ LOG = logging.getLogger('feedhandler')
 
 
 class ConnectionHandler:
-    def __init__(self, conn: AsyncConnection, subscribe: Awaitable, handler: Awaitable, retries: int, timeout=120, timeout_interval=30, exceptions=None, log_on_error=False):
+    def __init__(self, conn: AsyncConnection, subscribe: Awaitable, handler: Awaitable, authenticate: Awaitable, retries: int, timeout=120, timeout_interval=30, exceptions=None, log_on_error=False, start_delay=0):
         self.conn = conn
         self.subscribe = subscribe
         self.handler = handler
+        self.authenticate = authenticate
         self.retries = retries
         self.exceptions = exceptions
         self.log_on_error = log_on_error
         self.timeout = timeout
         self.timeout_interval = timeout_interval
         self.running = True
+        self.start_delay = start_delay
 
     def start(self, loop: asyncio.AbstractEventLoop):
         loop.create_task(self._create_connection())
@@ -47,17 +50,19 @@ class ConnectionHandler:
             await asyncio.sleep(self.timeout_interval)
 
     async def _create_connection(self):
+        await asyncio.sleep(self.start_delay)
         retries = 0
         rate_limited = 1
         delay = 1
         while (retries <= self.retries or self.retries == -1) and self.running:
             try:
                 async with self.conn.connect() as connection:
+                    await self.authenticate(connection)
+                    await self.subscribe(connection)
                     # connection was successful, reset retry count and delay
                     retries = 0
                     rate_limited = 0
                     delay = 1
-                    await self.subscribe(connection)
                     if self.timeout != -1:
                         loop = asyncio.get_running_loop()
                         loop.create_task(self._watcher())
@@ -79,8 +84,9 @@ class ConnectionHandler:
                             LOG.warning("%s: encountered exception %s, which is on the ignore list. Raising", self.conn.uuid, str(e))
                             raise
                 if e.status_code == 429:
-                    LOG.warning("%s: Rate Limited - waiting %d seconds to reconnect", self.conn.uuid, rate_limited * 60)
-                    await asyncio.sleep(rate_limited * 60)
+                    rand = random.uniform(1.0, 3.0)
+                    LOG.warning("%s: Rate Limited - waiting %d seconds to reconnect", self.conn.uuid, (rate_limited * 60 * rand))
+                    await asyncio.sleep(rate_limited * 60 * rand)
                     rate_limited += 1
                 else:
                     LOG.warning("%s: encountered connection issue %s - reconnecting in %.1f seconds...", self.conn.uuid, str(e), delay, exc_info=True)
